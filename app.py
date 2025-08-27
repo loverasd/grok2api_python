@@ -723,8 +723,12 @@ class GrokApiClient:
             cookie = f"{Utils.create_auth_headers(model, True)};{CONFIG['SERVER']['CF_CLEARANCE']}"
             proxy_options = Utils.get_proxy_options()
             response = curl_requests.post(
-                "https://grok.com/rest/app-chat/upload-file",
-                headers={**DEFAULT_HEADERS, "Cookie": cookie},
+                f"{CONFIG['API']['BASE_URL']}/rest/app-chat/upload-file",
+                headers={
+                    **DEFAULT_HEADERS,
+                    "Cookie": cookie,  # 由当前模型的有效 cookie + 可选 cf_clearance 拼出来
+                    "Content-Type": "application/json;charset=UTF-8",
+                },
                 json=upload_data,
                 impersonate="chrome133a",
                 **proxy_options,
@@ -860,156 +864,104 @@ class GrokApiClient:
     #         logger.error(str(error), "Server")
     #         raise ValueError(error)
     def prepare_chat_request(self, request):
-        if (
-            (
-                request["model"] == "grok-4-imageGen"
-                or request["model"] == "grok-3-imageGen"
-            )
-            and not CONFIG["API"]["PICGO_KEY"]
-            and not CONFIG["API"]["TUMY_KEY"]
-            and request.get("stream", False)
-        ):
-            raise ValueError("该模型流式输出需要配置PICGO或者TUMY图床密钥!")
-
-        # system_message, todo_messages = self.convert_system_messages(request["messages"]).values()
+        """
+        只取“最后一条用户消息”的文本作为 message，
+        将本轮用户消息里的 base64 图片先上传拿到 fileMetadataId，放入 fileAttachments。
+        请求体字段对齐 Web 端。
+        """
+        # 只保留最后一条用户消息
         todo_messages = request["messages"]
-        if request["model"] in [
-            "grok-4-imageGen",
-            "grok-3-imageGen",
-            "grok-3-deepsearch",
-        ]:
-            last_message = todo_messages[-1]
-            if last_message["role"] != "user":
-                raise ValueError("此模型最后一条消息必须是用户消息!")
-            todo_messages = [last_message]
-        file_attachments = []
-        image_attachments = []
-        messages = ""
-        last_role = None
-        last_content = ""
-        message_length = 0
-        convert_to_file = False
-        last_message_content = ""
-        search = request["model"] in ["grok-4-deepsearch", "grok-3-search"]
-        deepsearchPreset = ""
-        if request["model"] == "grok-3-deepsearch":
-            deepsearchPreset = "default"
-        elif request["model"] == "grok-3-deepersearch":
-            deepsearchPreset = "deeper"
+        if not todo_messages:
+            raise ValueError("消息内容为空!")
 
-        # 移除<think>标签及其内容和base64图片
-        def remove_think_tags(text):
-            import re
+        last = todo_messages[-1]
+        if last["role"] != "user":
+            raise ValueError("最后一条必须是用户消息!")
 
-            text = re.sub(r"<think>[\s\S]*?<\/think>", "", text).strip()
-            text = re.sub(r"!\[image\]\(data:.*?base64,.*?\)", "[图片]", text)
-            return text
-
-        def process_content(content):
+        # 从用户消息的 content 提取纯文本（不插入 [图片] 占位）
+        def extract_text(content):
             if isinstance(content, list):
-                text_content = ""
-                for item in content:
-                    if item["type"] == "image_url":
-                        text_content += "[图片]" if not text_content else "\n[图片]"
-                    elif item["type"] == "text":
-                        text_content += (
-                            remove_think_tags(item["text"])
-                            if not text_content
-                            else "\n" + remove_think_tags(item["text"])
-                        )
-                return text_content
-            elif isinstance(content, dict) and content is not None:
-                if content["type"] == "image_url":
-                    return "[图片]"
-                elif content["type"] == "text":
-                    return remove_think_tags(content["text"])
-            return remove_think_tags(self.process_message_content(content))
+                out = []
+                for it in content:
+                    if it.get("type") == "text":
+                        out.append(it.get("text", ""))
+                return "\n".join([s for s in out if s])
+            elif isinstance(content, dict) and content.get("type") == "text":
+                return content.get("text", "")
+            elif isinstance(content, str):
+                return content
+            return ""
 
-        for current in todo_messages:
-            role = "assistant" if current["role"] == "assistant" else "user"
-            is_last_message = current == todo_messages[-1]
+        message_text = extract_text(last.get("content", "")) or "请分析图片内容"
 
-            if is_last_message and "content" in current:
-                if isinstance(current["content"], list):
-                    for item in current["content"]:
-                        if item.get("type") == "image_url" and "image_url" in item:
-                            img_id = self.upload_base64_image(item["image_url"]["url"])
-                            if img_id:
-                                image_attachments.append(
-                                    img_id
-                                )  # ⬅️ 放到 image_attachments
-                elif (
-                    isinstance(current["content"], dict)
-                    and current["content"].get("type") == "image_url"
-                ):
-                    img_id = self.upload_base64_image(
-                        current["content"]["image_url"]["url"]
-                    )
-                    if img_id:
-                        image_attachments.append(img_id)
+        # 本轮图片：上传换 fileMetadataId -> fileAttachments
+        file_attachments = []
+        if isinstance(last.get("content"), list):
+            for it in last["content"]:
+                if it.get("type") == "image_url" and it.get("image_url", {}).get("url"):
+                    fid = self.upload_base64_image(it["image_url"]["url"])
+                    if fid:
+                        file_attachments.append(fid)
+        elif isinstance(last.get("content"), dict):
+            it = last["content"]
+            if it.get("type") == "image_url" and it.get("image_url", {}).get("url"):
+                fid = self.upload_base64_image(it["image_url"]["url"])
+                if fid:
+                    file_attachments.append(fid)
 
-            text_content = process_content(current.get("content", ""))
-            if is_last_message and convert_to_file:
-                last_message_content = f"{role.upper()}: {text_content or '[图片]'}\n"
-                continue
-            if text_content or (is_last_message and file_attachments):
-                if role == last_role and text_content:
-                    last_content += "\n" + text_content
-                    messages = (
-                        messages[: messages.rindex(f"{role.upper()}: ")]
-                        + f"{role.upper()}: {last_content}\n"
-                    )
-                else:
-                    messages += f"{role.upper()}: {text_content or '[图片]'}\n"
-                    last_content = text_content
-                    last_role = role
-            message_length += len(messages)
-            if message_length >= 40000:
-                convert_to_file = True
+        # 搜索/推理/图生图等开关
+        model = request["model"]
+        search = model in [
+            "grok-4-deepsearch",
+            "grok-3-search",
+            "grok-3-deepsearch",
+            "grok-3-deepersearch",
+        ]
+        is_reasoning = model in ["grok-3-reasoning", "grok-4-reasoning"]
 
-        if convert_to_file:
-            file_id = self.upload_base64_file(messages, request["model"])
-            if file_id:
-                file_attachments.insert(0, file_id)
-            messages = last_message_content.strip()
-        if messages.strip() == "":
-            if convert_to_file:
-                messages = "基于txt文件内容进行回复："
-            else:
-                raise ValueError("消息内容为空!")
-        packed = {
-            "temporary": CONFIG["API"].get("IS_TEMP_CONVERSATION", False),
+        # 允许外部透传（与你贴的 Web 请求保持相同字段）
+        conversation_id = request.get(
+            "conversationId"
+        )  # 若提供，会在 chat_completions 中选择 /responses
+        parent_response_id = request.get("parentResponseId")  # 同上
+        custom_personality = request.get("customPersonality", "")
+        image_generation_count = request.get("imageGenerationCount", 1)
+        enable_image_streaming = bool(request.get("stream", False))
+
+        payload = {
+            "message": message_text,
             "modelName": self.model_id,
-            "message": messages.strip(),
-            "fileAttachments": file_attachments[:4],  # 文本/大内容才放这里
-            "imageAttachments": image_attachments[:4],  # 图片才放这里
-            "disableSearch": False,
+            # 可选：续聊时才带
+            "parentResponseId": parent_response_id,
+            "disableSearch": False if not search else False,  # Web 示例是 false
             "enableImageGeneration": True,
+            "imageAttachments": [],  # 对齐 Web：图片用 fileAttachments
             "returnImageBytes": False,
             "returnRawGrokInXaiRequest": False,
-            "enableImageStreaming": False,
-            "imageGenerationCount": 1,
+            "fileAttachments": file_attachments[:4],  # 最多 4 张
+            "enableImageStreaming": enable_image_streaming,
+            "imageGenerationCount": image_generation_count,
             "forceConcise": False,
-            "toolOverrides": {
-                "imageGen": request["model"] in ["grok-4-imageGen", "grok-3-imageGen"],
-                "webSearch": search,
-                "xSearch": search,
-                "xMediaSearch": search,
-                "trendsSearch": search,
-                "xPostAnalyze": search,
-            },
+            "toolOverrides": {},  # Web 示例是空对象
             "enableSideBySide": True,
             "sendFinalMetadata": True,
-            "customPersonality": "",
-            "deepsearchPreset": deepsearchPreset,
-            "isReasoning": request["model"] == "grok-3-reasoning",
+            "customPersonality": custom_personality,
+            "isReasoning": is_reasoning,
+            "webpageUrls": request.get("webpageUrls", []),
+            "metadata": {"requestModelDetails": {"modelId": self.model_id}},
             "disableTextFollowUps": True,
+            # 下面这几个也与 Web 示例对齐（不是必需，但保持一致）
+            "isFromGrokFiles": False,
+            "disableMemory": False,
+            "forceSideBySide": False,
+            "modelMode": "MODEL_MODE_EXPERT",
+            "isAsyncChat": False,
+            "isRegenRequest": False,
         }
-        logger.info(
-            f"[PrepChat] 打包完成 text_len={len(messages.strip())} files={len(file_attachments[:4])} images={len(image_attachments[:4])} search={search} deepsearchPreset={deepsearchPreset}",
-            "PrepChat",
-        )
-        return packed
+
+        # 清理 None 字段
+        payload = {k: v for k, v in payload.items() if v is not None}
+        return payload
 
 
 class MessageProcessor:
@@ -1597,8 +1549,12 @@ def chat_completions():
                 proxy_options = Utils.get_proxy_options()
                 response = curl_requests.post(
                     f"{CONFIG['API']['BASE_URL']}/rest/app-chat/conversations/new",
-                    headers={**DEFAULT_HEADERS, "Cookie": CONFIG["SERVER"]["COOKIE"]},
-                    data=json.dumps(request_payload),
+                    headers={
+                        **DEFAULT_HEADERS,
+                        "Cookie": CONFIG["SERVER"]["COOKIE"],
+                        "Content-Type": "application/json;charset=UTF-8",
+                    },
+                    json=request_payload,  # ✅ 让库自己序列化，并配合上面的 JSON 头
                     impersonate="chrome133a",
                     stream=True,
                     **proxy_options,
