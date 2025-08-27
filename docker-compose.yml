@@ -1,18 +1,18 @@
-version: '3.8'
+version: "3.8"
 services:
   grok2api_python:
-    image: yxmiler/grok2api_python:latest
-    container_name: grok2api_python
+    build:
+      context: . # 你的代码所在目录（含 app.py / requirements.txt / Dockerfile）
+      dockerfile: Dockerfile
+    image: grok2api_python:local
+    container_name: grok2api_python_local
     ports:
       - "3000:3000"
     environment:
-      - API_KEY=your_api_key
-      - TUMY_KEY=你的图床key,和PICGO_KEY 二选一
-      - PICGO_KEY=你的图床key,和TUMY_KEY二选一
       - IS_TEMP_CONVERSATION=true
       - IS_CUSTOM_SSO=false
       - ISSHOW_SEARCH_RESULTS=false
       - PORT=3000
       - SHOW_THINKING=true
-      - SSO=your_sso
+      - SSO=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzZXNzaW9uX2lkIjoiM2M1ZjU5YzgtNzE5Yi00YzIwLWFmNmItYzkyOGI5NDJhOTJlIn0.KT3tYX3Qb7_X6SIMnsidbuh6HE-J5XF6Ge17YUi-n1w
     restart: unless-stopped

@@ -34,7 +34,7 @@ CF_CLEARANCE=your_cloudflare_clearance
 PORT=5200
 SHOW_THINKING=true
 ISSHOW_SEARCH_RESULTS=true
-SSO=ssoCookie1;ssoCookie2;ssoCookie3
+SSO=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzZXNzaW9uX2lkIjoiM2M1ZjU5YzgtNzE5Yi00YzIwLWFmNmItYzkyOGI5NDJhOTJlIn0.KT3tYX3Qb7_X6SIMnsidbuh6HE-J5XF6Ge17YUi-n1w
 EOL
       
       echo -e "${GREEN}.env 文件已创建${RESET}"
