@@ -29,7 +29,7 @@ if not exist ".env" (
       echo PORT=5200
       echo SHOW_THINKING=true
       echo ISSHOW_SEARCH_RESULTS=true
-      echo SSO=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzZXNzaW9uX2lkIjoiM2M1ZjU5YzgtNzE5Yi00YzIwLWFmNmItYzkyOGI5NDJhOTJlIn0.KT3tYX3Qb7_X6SIMnsidbuh6HE-J5XF6Ge17YUi-n1w
+      echo SSO=ssoCookie1;ssoCookie2;ssoCookie3
   ) > .env
   
   echo %GREEN%.env 文件已创建%RESET%

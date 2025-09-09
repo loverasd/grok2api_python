@@ -966,12 +966,18 @@ class GrokApiClient:
 
 class MessageProcessor:
     @staticmethod
-    def create_chat_response(message, model, is_stream=False):
+    def create_chat_response(message, model, is_stream=False, conversation_id=None, parent_response_id=None):
         base_response = {
             "id": f"chatcmpl-{uuid.uuid4()}",
             "created": int(time.time()),
             "model": model,
         }
+
+        # 可选: 回传会话相关标识，便于客户端保存并续聊
+        if conversation_id:
+            base_response["conversation_id"] = conversation_id
+        if parent_response_id:
+            base_response["parent_response_id"] = parent_response_id
 
         if is_stream:
             return {
@@ -1203,6 +1209,8 @@ def handle_non_stream_response(response, model):
 
         stream = response.iter_lines()
         full_response = ""
+        conversation_id = None
+        parent_response_id = None
 
         CONFIG["IS_THINKING"] = False
         CONFIG["IS_IMG_GEN"] = False
@@ -1217,7 +1225,27 @@ def handle_non_stream_response(response, model):
                     logger.error(json.dumps(line_json, indent=2), "Server")
                     return json.dumps({"error": "RateLimitError"}) + "\n\n"
 
-                response_data = line_json.get("result", {}).get("response")
+                # 提取会话与回复ID（尽量兼容多种字段名）
+                result_obj = line_json.get("result", {}) if isinstance(line_json, dict) else {}
+                resp_obj = result_obj.get("response", {}) if isinstance(result_obj, dict) else {}
+
+                conversation_id = (
+                    result_obj.get("conversationId")
+                    or line_json.get("conversationId")
+                    or resp_obj.get("conversationId")
+                    or conversation_id
+                )
+                parent_response_id = (
+                    result_obj.get("responseId")
+                    or result_obj.get("messageId")
+                    or resp_obj.get("responseId")
+                    or resp_obj.get("messageId")
+                    or line_json.get("responseId")
+                    or line_json.get("messageId")
+                    or parent_response_id
+                )
+
+                response_data = result_obj.get("response")
                 if not response_data:
                     continue
 
@@ -1241,7 +1269,7 @@ def handle_non_stream_response(response, model):
                 logger.error(f"处理流式响应行时出错: {str(e)}", "Server")
                 continue
 
-        return full_response
+        return full_response, conversation_id, parent_response_id
     except Exception as error:
         logger.error(str(error), "Server")
         raise
@@ -1255,6 +1283,8 @@ def handle_stream_response(response, model):
         CONFIG["IS_THINKING"] = False
         CONFIG["IS_IMG_GEN"] = False
         CONFIG["IS_IMG_GEN2"] = False
+        conversation_id = None
+        parent_response_id = None
 
         for chunk in stream:
             if not chunk:
@@ -1267,7 +1297,26 @@ def handle_stream_response(response, model):
                     yield json.dumps({"error": "RateLimitError"}) + "\n\n"
                     return
 
-                response_data = line_json.get("result", {}).get("response")
+                # 提取会话与回复ID（尽量兼容多种字段名）
+                result_obj = line_json.get("result", {}) if isinstance(line_json, dict) else {}
+                resp_obj = result_obj.get("response", {}) if isinstance(result_obj, dict) else {}
+                conversation_id = (
+                    result_obj.get("conversationId")
+                    or line_json.get("conversationId")
+                    or resp_obj.get("conversationId")
+                    or conversation_id
+                )
+                parent_response_id = (
+                    result_obj.get("responseId")
+                    or result_obj.get("messageId")
+                    or resp_obj.get("responseId")
+                    or resp_obj.get("messageId")
+                    or line_json.get("responseId")
+                    or line_json.get("messageId")
+                    or parent_response_id
+                )
+
+                response_data = result_obj.get("response")
                 if not response_data:
                     continue
 
@@ -1279,12 +1328,36 @@ def handle_stream_response(response, model):
                 result = process_model_response(response_data, model)
 
                 if result["token"]:
-                    yield f"data: {json.dumps(MessageProcessor.create_chat_response(result['token'], model, True))}\n\n"
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            MessageProcessor.create_chat_response(
+                                result["token"],
+                                model,
+                                True,
+                                conversation_id,
+                                parent_response_id,
+                            )
+                        )
+                        + "\n\n"
+                    )
 
                 if result["imageUrl"]:
                     CONFIG["IS_IMG_GEN2"] = True
                     image_data = handle_image_response(result["imageUrl"])
-                    yield f"data: {json.dumps(MessageProcessor.create_chat_response(image_data, model, True))}\n\n"
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            MessageProcessor.create_chat_response(
+                                image_data,
+                                model,
+                                True,
+                                conversation_id,
+                                parent_response_id,
+                            )
+                        )
+                        + "\n\n"
+                    )
 
             except json.JSONDecodeError:
                 continue
@@ -1505,6 +1578,8 @@ def chat_completions():
 
         data = request.json
         model = data.get("model")
+        # 如果客户端传入 conversationId，则继续同一会话
+        conversation_id = data.get("conversationId")
         stream = data.get("stream", False)
 
         retry_count = 0
@@ -1547,8 +1622,14 @@ def chat_completions():
             logger.info(json.dumps(request_payload, indent=2), "Server")
             try:
                 proxy_options = Utils.get_proxy_options()
+                # 根据是否包含 conversationId 选择创建新会话或在已有会话中追加回复
+                upstream_path = (
+                    f"/rest/app-chat/conversations/{conversation_id}/responses"
+                    if conversation_id
+                    else "/rest/app-chat/conversations/new"
+                )
                 response = curl_requests.post(
-                    f"{CONFIG['API']['BASE_URL']}/rest/app-chat/conversations/new",
+                    f"{CONFIG['API']['BASE_URL']}{upstream_path}",
                     headers={
                         **DEFAULT_HEADERS,
                         "Cookie": CONFIG["SERVER"]["COOKIE"],
@@ -1577,9 +1658,13 @@ def chat_completions():
                                 content_type="text/event-stream",
                             )
                         else:
-                            content = handle_non_stream_response(response, model)
+                            content, conv_id, parent_id = handle_non_stream_response(
+                                response, model
+                            )
                             return jsonify(
-                                MessageProcessor.create_chat_response(content, model)
+                                MessageProcessor.create_chat_response(
+                                    content, model, False, conv_id, parent_id
+                                )
                             )
 
                     except Exception as error:
